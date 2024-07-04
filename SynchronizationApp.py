@@ -2,40 +2,20 @@
 # The program should maintain a full, identical copy of source folder at replica folder. 
 
 import os
-import time
 import shutil
+import time
 from datetime import datetime
+import hashlib
 import logging
 
+import click
 
- # (Aditional feature)
-"""
-def list_check(dir_path, nr, space):
 
-    sub_dir = os.path.basename(dir_path)
-    for i in range(1, nr):
-        space += " "
+# Actual time
+def actual_time():
+    time_now = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    return time_now
 
-    if not os.path.isdir(dir_path):
-        print(f"Error: {dir_path} is not a valid directory.")
-
-    for item in os.listdir(dir_path):
-        item_path = os.path.join(dir_path, item)
-    
-        if os.path.isfile(item_path):
-            item_size = os.path.getsize(item_path)
-            item_name = os.path.basename(item_path)
-            item_date = time.strftime("%Y-%m-%d %H:%M:%S",(time.localtime(os.path.getmtime(item_path))))
-            print(f"{space}> {sub_dir} - {item_name} (size: {item_size}, date: {item_date})")
-        elif os.path.isdir(item_path):
-            item_name = os.path.basename(item_path)
-            print(f"{space}> {item_name} (folder)")
-            nr += 1
-            list_check(item_path, nr, space)
-        else:
-            break
-    print()
-"""
 
 # Function for findng item in list
 def find_item_in_list(item_name, dir_path):
@@ -48,7 +28,7 @@ def find_item_in_list(item_name, dir_path):
 
 # Function for comparing two files by modification time and cize
 def compare_files(dir_path1, dir_path2):
-    
+
     # Compare file modification times
     src_mtime = os.path.getmtime(dir_path1)
     rep_mtime = os.path.getmtime(dir_path2)
@@ -60,8 +40,21 @@ def compare_files(dir_path1, dir_path2):
     rep_size = os.path.getsize(dir_path2)
     if src_size != rep_size:
         return False
-
     return True
+
+
+# Function for 
+def compute_md5(file_path):
+    # Compute the md5 hash of item
+    hash_md5 = hashlib.md5()
+    # Opening file in binary mode
+    with open(file_path, "rb") as f:
+        # Read the file in chunks of 6144 bytes until the end of the file is reached
+        for chunk in iter(lambda: f.read(6144), b""):
+            # Update the hash object with the bytes of the current chunk
+            hash_md5.update(chunk)
+    # Return the hexadecimal representation of the digest (the computed hash)
+    return hash_md5.hexdigest()
 
 
 # Synchronization function
@@ -82,25 +75,28 @@ def synchronization(src_dir, rep_dir, logger):
         item_name = os.path.basename(src_item)
         found_item = find_item_in_list(item_name, rep_dir)
 
-        # Item part
+        # Item copy/rewrite part
         if not os.path.isdir(src_item):
             if not found_item:
-                compared_file = False
-            else:
-                compared_file = compare_files(src_item, found_item)
-
-            if compared_file == False:
                 shutil.copy2(src_item, rep_item)
-                print(f" > Coppied item: '{item_name}' to directory: '{rep_dir}'")
-                logger.info(f" > Coppied item: '{item_name}' to directory: '{rep_dir}'")
+                print(f" > Copied file: '{item_name}' to directory: '{rep_dir}' [{actual_time()}]")
+                logger.info(f" > Copied file: '{item_name}' to directory: '{rep_dir}'")
+            else:
+                if compute_md5(src_item) == compute_md5(found_item):
+                    continue
+                else:
+                    shutil.copy2(src_item, rep_item)
+                    print(f"Overwritten file: '{item_name}' (didn't match source), directory: '{rep_dir}' [{actual_time()}]")
+                    logger.info(f"Overwritten file: '{item_name}' (didn't match source), directory: '{rep_dir}'")
 
         # Folder part
         else:
             if not found_item:
                 os.mkdir(rep_item)
-                print(f" > Created directory: '{rep_item}'")
+                print(f" > Created directory: '{rep_item}' [{actual_time()}]")
                 logger.info(f" > Created directory: '{rep_item}'")
             synchronization(src_item, rep_item, logger)
+
 
 # Function for removing files in replica directory that is missing in source directory
 def remove_redundant_files(src_dir, rep_dir, logger):
@@ -113,21 +109,25 @@ def remove_redundant_files(src_dir, rep_dir, logger):
 
         if not os.path.isdir(rep_item):
             if not found_item:
-                compared_file = False                
+                compared_file = False   
             else:
-                compared_file = compare_files(rep_item, found_item)
+                if compute_md5(src_item) == compute_md5(found_item):
+                    compared_file = True
+                else:
+                    compared_file = False             
 
             if compared_file == False:
                 os.remove(rep_item)
-                print(f" > Removed item: '{item_name}' in directory: '{rep_dir}'")
+                print(f" > Removed item: '{item_name}' in directory: '{rep_dir}' [{actual_time()}]")
                 logger.info(f" > Removed item: '{item_name}' in directory: '{rep_dir}'")
         else:
             if not found_item:
                 shutil.rmtree(rep_item)
-                print(f" > Removed directory: '{rep_item}'")
+                print(f" > Removed directory: '{rep_item}' [{actual_time()}]")
                 logger.info(f" > Removed directory: '{rep_item}'")
             else:
                 remove_redundant_files(src_item, rep_item, logger)
+
 
 # Log file settings
 def setup_logging(log_file_path):
@@ -138,49 +138,62 @@ def setup_logging(log_file_path):
     # Configure logging
     logging.basicConfig(
         filename=log_file_path,
-        level=logging.DEBUG,
+        level=logging.INFO,
         format='%(asctime)s - %(name)s - %(message)s'
     )
 
 
-def main_loop():
+@click.command()  # Decorator to define a Click command
+@click.option(
+    "-s",  # Short option flag
+    "--source",  # Long option flag
+    prompt="Source folder",  # Prompt text to display if the option is not provided
+    type=click.Path(exists=True, file_okay=False, dir_okay=True)  # Option type with validation
+)
+@click.option(
+    "-r",
+    "--replica",
+    prompt="Replica folder",
+    type=click.Path(exists=False, file_okay=False, dir_okay=True, readable=True, writable=True),
+)
+@click.option(
+    "-i",
+    "--interval",
+    prompt="Synchornization interval",
+    type=click.DateTime(formats=["%H:%M:%S"]),
+)
+@click.option(
+    "-lf",
+    "--log-file-path",
+    prompt="Log file path",
+    type=click.Path(exists=False, file_okay=True, dir_okay=False, readable=True, writable=True),
+)
 
-    # Prompt the user for both paths
-    source = str(input("\nEnter full source directory: "))
-    replica = str(input("Enter full replica directory: "))
 
-    # Prompt the user for the log file path
-    log_file_path = input("Enter the name for the log file (e.g. C:/app/logfile.log): ")
+def main(source, replica, interval, log_file_path: str):
+
     setup_logging(log_file_path)
     logger = logging.getLogger("SyncApp")
     logger.info("Sychronization application started.")
 
-    # Prompt the user for sync interval in seconds
-    time_sync = int(input("Enter synchronization interval (seconds): "))
-    logger.info(f"Sychronization interval was set to {time_sync} seconds.")
+    interval_seconds = (interval - datetime(1900, 1, 1)).total_seconds()
+    logger.info(f"Sychronization interval was set to {interval_seconds} seconds.")
 
-    # (Aditional feature)
-    """
-    print("\n___Source & replica list:___\n")
-    nr = 1
-    space = ""
-    list_check(source, nr, space)
-    list_check(replica, nr, space)
-    """
     print()
 
     try:
         while True:
             now = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-            print(f"Starting synchronization... [{now}]")
+            print(f"Starting synchronization... [{actual_time()}]")
             remove_redundant_files(source, replica, logger)
             synchronization(source, replica, logger)
-            print(f"Synchronization complete.\nRepeat in {time_sync} seconds. (press CTRL+C to end)\n")
-            time.sleep(time_sync)
+            print(f"Synchronization complete. [{actual_time()}]\nRepeat in {interval_seconds} seconds. (press CTRL+C to end)\n")
+            time.sleep(interval_seconds)
     except KeyboardInterrupt:
         print("Goodbye!\n")
         logger.info("Sychronization application ended.")
         pass
 
+
 if __name__ == "__main__":
-    main_loop()
+    main()
